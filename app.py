@@ -1,4 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash, send_file
+from flask import Flask, render_template, request, redirect, url_for, session, flash
 from werkzeug.utils import secure_filename
 from openpyxl import load_workbook
 from datetime import datetime
@@ -6,7 +6,7 @@ import os
 import secrets
 
 # -----------------------------
-# App Setup
+# App Configuration
 # -----------------------------
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(16))
@@ -14,7 +14,7 @@ app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(16))
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # -----------------------------
-# Folders (Render Safe)
+# Folder Setup (Render Safe)
 # -----------------------------
 UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
 INVOICE_FOLDER = os.path.join(BASE_DIR, "invoices")
@@ -91,13 +91,13 @@ def submit_payment():
     file = request.files["payment_screenshot"]
 
     if file.filename == "":
-        flash("No file selected")
+        flash("Please select a file.")
         return redirect(url_for("dashboard"))
 
-    # Secure filename
-    filename = secure_filename(file.filename)
+    # Safe filename
+    original_filename = secure_filename(file.filename)
+    extension = original_filename.split(".")[-1]
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-    extension = filename.split(".")[-1]
     new_filename = f"{username}_{timestamp}.{extension}"
 
     filepath = os.path.join(app.config["UPLOAD_FOLDER"], new_filename)
@@ -109,7 +109,8 @@ def submit_payment():
 
     for row in sheet.iter_rows(min_row=2):
         if row[0].value == username:
-            row[2].value = float(row[2].value or 0) + float(amount)  # Paid column
+            paid_amount = float(row[2].value or 0)
+            row[2].value = paid_amount + float(amount)
             row[3].value = "Pending Approval"
             break
 
@@ -147,7 +148,8 @@ def logout():
     return redirect(url_for("home"))
 
 # -----------------------------
-# Run
+# Run (IMPORTANT FOR RENDER)
 # -----------------------------
 if __name__ == "__main__":
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port)
