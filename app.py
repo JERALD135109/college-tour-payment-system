@@ -1,173 +1,315 @@
-from flask import Flask, render_template, request, redirect, url_for, session, flash
-from werkzeug.utils import secure_filename
-from openpyxl import load_workbook
-from datetime import datetime
+from flask import Flask, render_template, request, redirect, url_for, session, send_file
 import os
-import secrets
+import json
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import datetime
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from generate_invoice import create_invoice
 
-# -----------------------------
-# App Setup
-# -----------------------------
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", secrets.token_hex(16))
+app.secret_key = "supersecretkey"
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# -----------------------------
-# Folder Setup (Render Safe)
-# -----------------------------
-UPLOAD_FOLDER = os.path.join(BASE_DIR, "static", "uploads")
-INVOICE_FOLDER = os.path.join(BASE_DIR, "invoices")
+# =========================
+# CONFIG
+# =========================
+ADMIN_PASSWORD = "jerald@70928"
+SHEET_NAME = "CollegeTour"
+UPLOAD_FOLDER = "static/uploads"
+INVOICE_FOLDER = "invoices"
 
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(INVOICE_FOLDER, exist_ok=True)
 
-app.config["UPLOAD_FOLDER"] = UPLOAD_FOLDER
-app.config["INVOICE_FOLDER"] = INVOICE_FOLDER
+# =========================
+# GOOGLE SHEET CONNECTION
+# =========================
+def get_sheet():
 
-# -----------------------------
-# Excel File
-# -----------------------------
-EXCEL_FILE = os.path.join(BASE_DIR, "trip_data.xlsx")
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive"
+    ]
 
-ADMIN_PASSWORD = "admin123"
+    creds_env = os.getenv("GOOGLE_CREDENTIALS")
 
-# -----------------------------
-# Home Page
-# -----------------------------
+    if not creds_env:
+        raise Exception("GOOGLE_CREDENTIALS environment variable not set")
+
+    creds_dict = json.loads(creds_env)
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+
+    client = gspread.authorize(creds)
+
+    spreadsheet = client.open(SHEET_NAME)
+    worksheet = spreadsheet.sheet1
+
+    return worksheet
+
+
+def get_all_members():
+    sheet = get_sheet()
+    return sheet.get_all_records()
+
+
+def update_member_row(row_number, data):
+    sheet = get_sheet()
+    sheet.update(f"A{row_number}:L{row_number}", [data])
+
+
+def add_new_member(data):
+    sheet = get_sheet()
+    sheet.append_row(data)
+
+
+# =========================
+# EMAIL FUNCTION
+# =========================
+def send_payment_email(to_email, name, amount):
+
+    sender_email = "gjerald121@gmail.com"
+    sender_password = os.getenv("EMAIL_PASSWORD")
+
+    if not sender_password:
+        print("EMAIL_PASSWORD not set")
+        return
+
+    subject = "Payment Verified - College Tour"
+
+    body = f"""
+Hello {name},
+
+Your payment of ₹{amount} has been successfully verified.
+
+Thank you,
+College Tour Team
+"""
+
+    msg = MIMEMultipart()
+    msg["From"] = sender_email
+    msg["To"] = to_email
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+
+    try:
+        server = smtplib.SMTP("smtp.gmail.com", 587)
+        server.starttls()
+        server.login(sender_email, sender_password)
+        server.send_message(msg)
+        server.quit()
+    except Exception as e:
+        print("Email Error:", e)
+
+
+# =========================
+# ROUTES
+# =========================
+
 @app.route("/")
 def home():
     return render_template("login.html")
 
-# -----------------------------
-# Login (SAFE VERSION)
-# -----------------------------
+
 @app.route("/login", methods=["POST"])
 def login():
-    username = request.form.get("username")
-    password = request.form.get("password")
+    name = request.form["name"]
+    members = get_all_members()
 
-    if not username or not password:
-        flash("Invalid login form.")
-        return redirect(url_for("home"))
+    for m in members:
+        if m["Name"] == name:
+            session["user"] = name
+            return redirect(url_for("dashboard"))
 
-    if password == ADMIN_PASSWORD:
-        session.clear()
-        session["admin"] = True
-        return redirect(url_for("admin_dashboard"))
-    else:
-        session.clear()
-        session["username"] = username
-        return redirect(url_for("dashboard"))
+    return "User not found."
 
-# -----------------------------
-# User Dashboard
-# -----------------------------
+
 @app.route("/dashboard")
 def dashboard():
-    if "username" not in session:
+    if "user" not in session:
         return redirect(url_for("home"))
 
-    username = session["username"]
+    name = session["user"]
+    members = get_all_members()
 
-    try:
-        wb = load_workbook(EXCEL_FILE)
-        sheet = wb.active
+    for m in members:
+        if m["Name"] == name:
+            return render_template("dashboard.html", user=m)
 
-        user_data = None
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            if row[0] == username:
-                user_data = row
-                break
+    return "User not found."
 
-        wb.close()
 
-    except Exception as e:
-        return f"Excel Error: {str(e)}"
-
-    return render_template("dashboard.html", user=user_data)
-
-# -----------------------------
-# Submit Payment
-# -----------------------------
 @app.route("/submit_payment", methods=["POST"])
 def submit_payment():
-    if "username" not in session:
+    if "user" not in session:
         return redirect(url_for("home"))
 
-    username = session["username"]
-    amount = request.form.get("amount")
-    file = request.files.get("payment_screenshot")
+    name = session["user"]
+    reference = request.form["reference"]
+    amount_paid = float(request.form["amount"])
+    file = request.files["screenshot"]
 
-    if not amount or not file or file.filename == "":
-        flash("All fields are required.")
-        return redirect(url_for("dashboard"))
+    members = get_all_members()
 
-    try:
-        # Secure filename
-        original_filename = secure_filename(file.filename)
-        extension = original_filename.split(".")[-1]
-        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-        new_filename = f"{username}_{timestamp}.{extension}"
+    for index, m in enumerate(members, start=2):
+        if m["Name"] == name:
 
-        filepath = os.path.join(app.config["UPLOAD_FOLDER"], new_filename)
-        file.save(filepath)
+            total = float(m["Total Amount"] or 0)
+            previous_paid = float(m["Paid Amount"] or 0)
 
-        # Update Excel
-        wb = load_workbook(EXCEL_FILE)
-        sheet = wb.active
+            new_paid = previous_paid + amount_paid
+            balance = total - new_paid
 
-        for row in sheet.iter_rows(min_row=2):
-            if row[0].value == username:
-                paid_amount = float(row[2].value or 0)
-                row[2].value = paid_amount + float(amount)
-                row[3].value = "Pending Approval"
-                break
+            filename = f"{name}_{datetime.now().strftime('%Y%m%d%H%M%S')}.png"
+            filepath = os.path.join(UPLOAD_FOLDER, filename)
+            file.save(filepath)
 
-        wb.save(EXCEL_FILE)
-        wb.close()
+            updated_row = [
+                name,
+                m["Email"],
+                total,
+                new_paid,
+                balance,
+                "Submitted",
+                reference,
+                filename,
+                m.get("Invoice", ""),
+                datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+                m.get("Verified At", ""),
+                m.get("Bill No", "")
+            ]
 
-        flash("Payment submitted successfully!")
-
-    except Exception as e:
-        return f"Payment Error: {str(e)}"
+            update_member_row(index, updated_row)
+            break
 
     return redirect(url_for("dashboard"))
 
-# -----------------------------
-# Admin Dashboard
-# -----------------------------
+
 @app.route("/admin")
+def admin():
+    return render_template("admin_login.html")
+
+
+@app.route("/admin_login", methods=["POST"])
+def admin_login():
+    if request.form["password"] == ADMIN_PASSWORD:
+        session["admin"] = True
+        return redirect(url_for("admin_dashboard"))
+    return "Wrong password."
+
+
+@app.route("/admin/dashboard")
 def admin_dashboard():
     if "admin" not in session:
+        return redirect(url_for("admin"))
+
+    members = get_all_members()
+    return render_template("admin_dashboard.html", members=members)
+
+
+@app.route("/verify/<name>")
+def verify(name):
+    if "admin" not in session:
+        return redirect(url_for("admin"))
+
+    members = get_all_members()
+
+    for index, m in enumerate(members, start=2):
+        if m["Name"] == name:
+
+            total = float(m["Total Amount"] or 0)
+            paid = float(m["Paid Amount"] or 0)
+            balance = float(m["Balance"] or 0)
+
+            verified_time = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
+            bill_no = "CT-" + datetime.now().strftime("%Y%m%d%H%M%S")
+
+            status = "Verified" if balance <= 0 else "Partially Paid"
+
+            invoice_path = create_invoice(
+                name=name,
+                installment=paid,
+                total_paid=paid,
+                total_amount=total,
+                balance=balance,
+                reference=m["Reference"],
+                bill_no=bill_no,
+                submitted_at=m.get("Submitted At", ""),
+                verified_at=verified_time
+            )
+
+            updated_row = [
+                name,
+                m["Email"],
+                total,
+                paid,
+                balance,
+                status,
+                m["Reference"],
+                m["Screenshot"],
+                invoice_path,
+                m.get("Submitted At", ""),
+                verified_time,
+                bill_no
+            ]
+
+            update_member_row(index, updated_row)
+            send_payment_email(m["Email"], name, paid)
+            break
+
+    return redirect(url_for("admin_dashboard"))
+
+
+@app.route("/download_invoice")
+def download_invoice():
+    if "user" not in session:
         return redirect(url_for("home"))
 
-    try:
-        wb = load_workbook(EXCEL_FILE)
-        sheet = wb.active
+    name = session["user"]
+    members = get_all_members()
 
-        members = []
-        for row in sheet.iter_rows(min_row=2, values_only=True):
-            members.append(row)
+    for m in members:
+        if m["Name"] == name:
+            invoice = m.get("Invoice", "")
+            if invoice and os.path.exists(invoice):
+                return send_file(invoice, as_attachment=True)
 
-        wb.close()
+    return "Invoice not available."
 
-    except Exception as e:
-        return f"Admin Error: {str(e)}"
 
-    return render_template("admin.html", members=members)
+@app.route("/add_member", methods=["POST"])
+def add_member():
+    if "admin" not in session:
+        return redirect(url_for("admin"))
 
-# -----------------------------
-# Logout
-# -----------------------------
+    name = request.form["name"]
+    email = request.form["email"]
+    total = float(request.form["amount"])
+
+    add_new_member([
+        name,
+        email,
+        total,
+        0,
+        total,
+        "Pending",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    ])
+
+    return redirect(url_for("admin_dashboard"))
+
+
 @app.route("/logout")
 def logout():
     session.clear()
     return redirect(url_for("home"))
 
-# -----------------------------
-# Render PORT Configuration
-# -----------------------------
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True)
