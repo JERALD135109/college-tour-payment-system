@@ -1,17 +1,16 @@
-import gspread
 import os
 import json
+import gspread
 from google.oauth2.service_account import Credentials
 
-# =============================
-# GOOGLE SHEET FILE NAME
-# =============================
-SHEET_NAME = "CollegeTourSystem"   # <-- MUST match your Google Sheet file name exactly
+# ===============================
+# CONFIG
+# ===============================
+SHEET_NAME = "CollegeTourSystem"   # Must match your Google Sheet name exactly
 
-
-# =============================
+# ===============================
 # CONNECT TO GOOGLE SHEET
-# =============================
+# ===============================
 def get_sheet():
 
     scopes = [
@@ -19,65 +18,65 @@ def get_sheet():
         "https://www.googleapis.com/auth/drive"
     ]
 
-    # 🔹 1️⃣ Render Environment Mode
+    # Get credentials from Render Environment Variable
     creds_env = os.getenv("GOOGLE_CREDENTIALS")
 
-    if creds_env:
-        creds_dict = json.loads(creds_env)
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    if not creds_env:
+        raise Exception("GOOGLE_CREDENTIALS environment variable not set")
 
-    # 🔹 2️⃣ Local Development Mode (JSON File)
-    else:
-        creds = Credentials.from_service_account_file(
-            "college-tour-credentials.json",   # <-- Must exist in project folder
-            scopes=scopes
-        )
+    # Convert string → dict
+    creds_dict = json.loads(creds_env)
 
+    # Create credentials object
+    creds = Credentials.from_service_account_info(
+        creds_dict,
+        scopes=scopes
+    )
+
+    # Authorize client
     client = gspread.authorize(creds)
 
-    # Open spreadsheet
+    # Open sheet by name
     spreadsheet = client.open(SHEET_NAME)
 
-    # ✅ Always use first tab (no worksheet name errors)
+    # Use first worksheet
     worksheet = spreadsheet.sheet1
 
     return worksheet
 
 
-# =============================
+# ===============================
 # GET ALL MEMBERS
-# =============================
+# ===============================
 def get_all_members():
     sheet = get_sheet()
     records = sheet.get_all_records()
     return records
 
 
-# =============================
-# UPDATE FULL MEMBER ROW
-# =============================
-def update_member_row(index, data_dict):
-    """
-    index = 0-based index from get_all_members()
-    data_dict = {"Column Name": value}
-    """
-
+# ===============================
+# UPDATE SINGLE CELL
+# row_number → actual sheet row
+# col_number → column index (1 based)
+# ===============================
+def update_member_cell(row_number, col_number, value):
     sheet = get_sheet()
-
-    # Google Sheet row index (row 1 is header)
-    row_number = index + 2
-
-    headers = sheet.row_values(1)
-
-    for key, value in data_dict.items():
-        if key in headers:
-            col_number = headers.index(key) + 1
-            sheet.update_cell(row_number, col_number, value)
+    sheet.update_cell(row_number, col_number, value)
 
 
-# =============================
+# ===============================
+# UPDATE ENTIRE MEMBER ROW
+# row_number → actual row index
+# row_data → list of values
+# ===============================
+def update_member_row(row_number, row_data):
+    sheet = get_sheet()
+    sheet.update(f"A{row_number}:L{row_number}", [row_data])
+
+
+# ===============================
 # ADD NEW MEMBER
-# =============================
-def add_new_member(data_list):
+# ===============================
+def add_new_member(row_data):
     sheet = get_sheet()
-    sheet.append_row(data_list)
+    sheet.append_row(row_data)
